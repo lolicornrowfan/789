@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>三體問題模擬</title>
+  <style>
+    body{margin:0;background:#071226;color:#e6f0ff;font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial}
+    header{padding:12px 16px;display:flex;gap:12px;align-items:center;background:linear-gradient(90deg,#071226, #071a2a)}
+    h1{font-size:16px;margin:0}
+    main{display:flex;gap:12px;height:calc(100vh - 56px)}
+    .controls{width:320px;padding:12px;box-sizing:border-box;background:linear-gradient(180deg,#071a2a,#06121a);border-right:1px solid rgba(255,255,255,.04);overflow:auto}
+    .canvas-wrap{flex:1;display:flex;flex-direction:column}
+    canvas{flex:1;background:radial-gradient(700px 400px at 30% 20%, rgba(20,40,80,.35), rgba(2,8,16,.6));display:block}
+    label{display:block;font-size:12px;margin-top:10px;color:#9fb7d8}
+    input[type=range]{width:100%}
+    input,button,select{width:100%;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,.06);background:#072231;color:inherit}
+    .row{display:flex;gap:8px}
+    .row>input{flex:1}
+    .planet-row{display:flex;align-items:center;gap:8px;margin-top:8px}
+    .dot{width:14px;height:14px;border-radius:50%;display:inline-block}
+    .small{font-size:13px;color:#9fb7d8}
+    .muted{font-size:12px;color:#7e9dbb}
+    .btn-row{display:flex;gap:8px;margin-top:8px}
+    .foot{padding:8px;font-size:12px;color:#7e9dbb}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>三體問題模擬（數值積分：RK4）</h1>
+    <div class="muted">調整質量、位置、速度；支援暫停、步進與尾跡。</div>
+  </header>
+  <main>
+    <aside class="controls">
+      <div>
+        <label>時間倍率 <span id="speedVal" class="small">1.0×</span></label>
+        <input type="range" id="speed" min="0" max="5" step="0.1" value="1">
+
+        <label>時間步長 dt（秒） <span id="dtVal" class="small">0.005</span></label>
+        <input type="range" id="dt" min="0.0005" max="0.02" step="0.0005" value="0.005">
+
+        <label>重力常數 G</label>
+        <input id="G" value="1" />
+
+        <label>柔化參數 ε （避免接近時震盪）</label>
+        <input id="eps" value="0.05" />
+
+        <div style="margin-top:10px">
+          <div class="btn-row">
+            <button id="play">暫停</button>
+            <button id="step">單步</button>
+            <button id="reset">重置</button>
+            <button id="clearTrails">清尾跡</button>
+          </div>
+        </div>
+
+        <hr style="margin:12px 0;border:0;border-top:1px solid rgba(255,255,255,.04)">
+
+        <div id="bodies">
+          <!-- dynamic rows -->
+        </div>
+
+        <div style="margin-top:10px">
+          <button id="addDefault">載入範例初始條件</button>
+          <button id="exportBtn">匯出設定（JSON）</button>
+          <input id="importFile" type="file" accept="application/json" style="display:none">
+          <button id="importBtn">匯入設定</button>
+        </div>
+
+        <div class="foot">說明：此模擬使用 2D 牛頓引力，數值積分採用 RK4。預設單位為任意制，G 可修改以調整尺度。若出現非常靠近的碰撞，請增大柔化參數 ε 或減小 dt。</div>
+      </div>
+    </aside>
+
+    <div class="canvas-wrap">
+      <canvas id="c"></canvas>
+      <div style="padding:8px;background:linear-gradient(180deg,rgba(0,0,0,.2),transparent);display:flex;justify-content:space-between;align-items:center">
+        <div class="small" id="info">t=0.000 s · steps=0</div>
+        <div class="muted small">拖曳可平移畫布，滑鼠滾輪縮放</div>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    // ======= 模擬參數 =======
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+    let W, H;
+
+    function resize(){
+      const dpr = Math.min(window.devicePixelRatio||1, 2);
+      W = canvas.clientWidth = canvas.parentElement.clientWidth;
+      H = canvas.clientHeight = window.innerHeight - 56 - 40;
+      canvas.width = Math.floor(W * dpr);
+      canvas.height = Math.floor(H * dpr);
+      canvas.style.width = W+'px'; canvas.style.height = H+'px';
+      ctx.setTransform(dpr,0,0,dpr,0,0);
+    }
+    window.addEventListener('resize', resize);
+
+    // camera
+    let camX = 0, camY = 0, zoom = 1;
+    let dragging = false, lastMouse = null;
+    canvas.addEventListener('wheel', e => { e.preventDefault(); const s = Math.exp(-e.deltaY*0.001); zoom *= s; zoom = Math.max(0.1, Math.min(zoom, 10)); });
+    canvas.addEventListener('mousedown', e=>{ dragging=true; lastMouse=[e.clientX,e.clientY]; });
+    window.addEventListener('mouseup', ()=>{ dragging=false; lastMouse=null; });
+    window.addEventListener('mousemove', e=>{ if(dragging && lastMouse){ camX += (e.clientX-lastMouse[0])/(zoom*1.0); camY += (e.clientY-lastMouse[1])/(zoom*1.0); lastMouse=[e.clientX,e.clientY]; } });
+
+    // UI
+    const speedEl = document.getElementById('speed'); const speedVal = document.getElementById('speedVal');
+    const dtEl = document.getElementById('dt'); const dtVal = document.getElementById('dtVal');
+    const GEl = document.getElementById('G'); const epsEl = document.getElementById('eps');
+    const playBtn = document.getElementById('play'); const stepBtn = document.getElementById('step'); const resetBtn = document.getElementById('reset'); const clearTrailsBtn = document.getElementById('clearTrails');
+    const bodiesDiv = document.getElementById('bodies');
+    const addDefaultBtn = document.getElementById('addDefault');
+    const info = document.getElementById('info');
+    const exportBtn = document.getElementById('exportBtn'); const importBtn = document.getElementById('importBtn'); const importFile = document.getElementById('importFile');
+
+    speedEl.oninput = ()=> speedVal.textContent = speedEl.value + '×';
+    dtEl.oninput = ()=> dtVal.textContent = Number(dtEl.value).toFixed(4);
+
+    // ======= 狀態 =======
+    let running = true;
+    let stepCount = 0;
+    let simTime = 0;
+
+    // bodies: array of {m, x,y, vx,vy, color, trail: []}
+    let bodies = [];
+
+    function addBody(b){ bodies.push({ ...b, trail: [] }); renderBodiesUI(); }
+    function clearBodies(){ bodies=[]; renderBodiesUI(); }
+
+    function defaultSetup(){
+      bodies = [];
+      // 一個常見的三體混沌樣例（倫納德-瓊斯類似配置）
+      addBody({m: 1.0, x:-0.97000436, y:0.24308753, vx:0.4662036850, vy:0.4323657300, color:'#f66'});
+      addBody({m: 1.0, x:0.97000436, y:-0.24308753, vx:0.4662036850, vy:0.4323657300, color:'#6ef'});
+      addBody({m: 1.0, x:0.0, y:0.0, vx:-0.93240737, vy:-0.86473146, color:'#6f6'});
+      // scale so they fit
+      camX=0; camY=0; zoom=180;
+      simTime=0; stepCount=0;
+    }
+
+    // UI for bodies
+    function renderBodiesUI(){
+      bodiesDiv.innerHTML='';
+      bodies.forEach((b,i)=>{
+        const wrap=document.createElement('div');
+        wrap.className='planet-row';
+        wrap.innerHTML = `
+          <div style="flex:1">
+            <div style=font-weight:700>${i+1}： m=<input data-i="${i}" data-key="m" value="${b.m}" style="width:70px"> </div>
+            <div class=muted>pos: x=<input data-i="${i}" data-key="x" value="${b.x}" style="width:80px"> y=<input data-i="${i}" data-key="y" value="${b.y}" style="width:80px"></div>
+            <div class=muted>vel: vx=<input data-i="${i}" data-key="vx" value="${b.vx}" style="width:80px"> vy=<input data-i="${i}" data-key="vy" value="${b.vy}" style="width:80px"></div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:6px">
+            <input data-i="${i}" data-key="color" value="${b.color}" type="color">
+            <button data-i="${i}" class="del">刪除</button>
+          </div>`;
+        bodiesDiv.appendChild(wrap);
+      });
+
+      // bind inputs
+      bodiesDiv.querySelectorAll('input').forEach(inp=>{
+        inp.onchange = ()=>{
+          const i=Number(inp.dataset.i); const key=inp.dataset.key; if(!Number.isNaN(i) && bodies[i]){
+            if(key==='color'){ bodies[i].color = inp.value; } else bodies[i][key] = Number(inp.value);
+          }
+        }
+      });
+      bodiesDiv.querySelectorAll('.del').forEach(btn=>{ btn.onclick=()=>{ const i=Number(btn.dataset.i); bodies.splice(i,1); renderBodiesUI(); } });
+    }
+
+    addDefaultBtn.onclick = ()=>{ defaultSetup(); renderBodiesUI(); };
+
+    // export / import
+    exportBtn.onclick = ()=>{
+      const payload = { bodies: bodies.map(b=>({m:b.m,x:b.x,y:b.y,vx:b.vx,vy:b.vy,color:b.color})), G: Number(GEl.value), dt: Number(dtEl.value), eps: Number(epsEl.value), zoom }; 
+      const a=document.createElement('a'); a.href = URL.createObjectURL(new Blob([JSON.stringify(payload,null,2)],{type:'application/json'})); a.download='threebody.json'; a.click();
+    };
+    importBtn.onclick = ()=> importFile.click();
+    importFile.onchange = async (e)=>{
+      const f = e.target.files[0]; if(!f) return; const txt = await f.text(); try{ const obj = JSON.parse(txt); if(Array.isArray(obj.bodies)){ bodies = obj.bodies.map(b=>({...b,trail:[] })); renderBodiesUI(); } if(obj.G) GEl.value = obj.G; if(obj.dt) dtEl.value = obj.dt; if(obj.eps) epsEl.value = obj.eps; if(obj.zoom) zoom = obj.zoom; }catch(err){ alert('解析失敗'); }
+    };
+
+    // controls
+    playBtn.onclick = ()=>{ running = !running; playBtn.textContent = running? '暫停':'播放'; };
+    stepBtn.onclick = ()=>{ step(); draw(); };
+    resetBtn.onclick = ()=>{ defaultSetup(); bodies.forEach(b=>b.trail=[]); draw(); };
+    clearTrailsBtn.onclick = ()=>{ bodies.forEach(b=>b.trail=[]); };
+
+    // ======= 物理 =======
+    function accel(bodies, idx, G, eps){
+      const bi = bodies[idx]; let ax=0, ay=0;
+      for(let j=0;j<bodies.length;j++) if(j!==idx){
+        const bj = bodies[j]; const dx = bj.x - bi.x; const dy = bj.y - bi.y; const r2 = dx*dx + dy*dy + eps*eps; const r = Math.sqrt(r2);
+        const f = G * bj.m / (r2);
+        ax += f * dx / r; ay += f * dy / r;
+      }
+      return {ax, ay};
+    }
+
+    // RK4 integrator for all bodies
+    function rk4Step(bodies, dt, G, eps){
+      const n = bodies.length;
+      if(n===0) return;
+      // store originals
+      const xs = bodies.map(b=>b.x); const ys = bodies.map(b=>b.y); const vxs = bodies.map(b=>b.vx); const vys = bodies.map(b=>b.vy); const ms = bodies.map(b=>b.m);
+
+      // k1
+      const k1v = []; const k1x = [];
+      for(let i=0;i<n;i++){ const a = accel(bodies,i,G,eps); k1v.push([a.ax,a.ay]); k1x.push([vxs[i],vys[i]]); }
+
+      // k2: temp state
+      const temp = bodies.map((b,i)=>({x: xs[i] + k1x[i][0]*dt/2, y: ys[i] + k1x[i][1]*dt/2, vx: vxs[i] + k1v[i][0]*dt/2, vy: vys[i] + k1v[i][1]*dt/2, m: ms[i]}));
+      const k2v=[]; const k2x=[];
+      for(let i=0;i<n;i++){ k2v.push([0,0]); k2x.push([temp[i].vx,temp[i].vy]); }
+      for(let i=0;i<n;i++){
+        let ax=0,ay=0;
+        for(let j=0;j<n;j++) if(i!==j){ const dx = temp[j].x - temp[i].x; const dy = temp[j].y - temp[i].y; const r2 = dx*dx + dy*dy + eps*eps; const r = Math.sqrt(r2); const f = G * temp[j].m / r2; ax+= f*dx/r; ay += f*dy/r; }
+        k2v[i]=[ax,ay];
+      }
+
+      // k3
+      const temp3 = bodies.map((b,i)=>({x: xs[i] + k2x[i][0]*dt/2, y: ys[i] + k2x[i][1]*dt/2, vx: vxs[i] + k2v[i][0]*dt/2, vy: vys[i] + k2v[i][1]*dt/2, m: ms[i]}));
+      const k3v=[]; const k3x=[];
+      for(let i=0;i<n;i++){
+        k3x.push([temp3[i].vx,temp3[i].vy]); let ax=0,ay=0; for(let j=0;j<n;j++) if(i!==j){ const dx=temp3[j].x-temp3[i].x; const dy=temp3[j].y-temp3[i].y; const r2=dx*dx+dy*dy+eps*eps; const r=Math.sqrt(r2); const f = G * temp3[j].m / r2; ax+=f*dx/r; ay+=f*dy/r; } k3v.push([ax,ay]); }
+
+      // k4
+      const temp4 = bodies.map((b,i)=>({x: xs[i] + k3x[i][0]*dt, y: ys[i] + k3x[i][1]*dt, vx: vxs[i] + k3v[i][0]*dt, vy: vys[i] + k3v[i][1]*dt, m: ms[i]}));
+      const k4v=[]; const k4x=[];
+      for(let i=0;i<n;i++){
+        k4x.push([temp4[i].vx,temp4[i].vy]); let ax=0,ay=0; for(let j=0;j<n;j++) if(i!==j){ const dx=temp4[j].x-temp4[i].x; const dy=temp4[j].y-temp4[i].y; const r2=dx*dx+dy*dy+eps*eps; const r=Math.sqrt(r2); const f = G * temp4[j].m / r2; ax+=f*dx/r; ay+=f*dy/r; } k4v.push([ax,ay]); }
+
+      // combine
+      for(let i=0;i<n;i++){
+        bodies[i].x += dt*(k1x[i][0] + 2*k2x[i][0] + 2*k3x[i][0] + k4x[i][0]) / 6;
+        bodies[i].y += dt*(k1x[i][1] + 2*k2x[i][1] + 2*k3x[i][1] + k4x[i][1]) / 6;
+        bodies[i].vx += dt*(k1v[i][0] + 2*k2v[i][0] + 2*k3v[i][0] + k4v[i][0]) / 6;
+        bodies[i].vy += dt*(k1v[i][1] + 2*k2v[i][1] + 2*k3v[i][1] + k4v[i][1]) / 6;
+      }
+    }
+
+    // ======= 更新迴圈 =======
+    let last = performance.now();
+    function step(){
+      const dtUI = Number(dtEl.value);
+      const G = Number(GEl.value);
+      const eps = Number(epsEl.value);
+      const speed = Number(speedEl.value);
+      // advance by dt * speed
+      const substeps = Math.max(1, Math.round(speed*10));
+      const subdt = dtUI * speed / substeps;
+      for(let s=0;s<substeps;s++){
+        rk4Step(bodies, subdt, G, eps);
+        simTime += subdt;
+        stepCount++;
+        // record trails
+        bodies.forEach(b=>{ b.trail.push([b.x,b.y]); if(b.trail.length>800) b.trail.shift(); });
+      }
+    }
+
+    function draw(){
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      // transform: world -> screen
+      ctx.save(); ctx.translate(canvas.width/(2* (window.devicePixelRatio||1)), canvas.height/(2*(window.devicePixelRatio||1)) ); ctx.scale(zoom, zoom); ctx.translate(camX, camY);
+
+      // trails
+      bodies.forEach(b=>{
+        if(b.trail.length>1){ ctx.beginPath(); for(let i=0;i<b.trail.length;i++){ const [x,y]=b.trail[i]; if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y); } ctx.strokeStyle = b.color; ctx.lineWidth = 0.008/zoom; ctx.globalAlpha = 0.9; ctx.stroke(); ctx.globalAlpha=1; }
+      });
+
+      // bodies
+      bodies.forEach(b=>{
+        ctx.beginPath(); ctx.fillStyle = b.color; ctx.arc(b.x, b.y, Math.max(0.012, Math.log(1+b.m)*0.02), 0, Math.PI*2); ctx.fill();
+        // velocity vector small
+        ctx.beginPath(); ctx.moveTo(b.x,b.y); ctx.lineTo(b.x + b.vx*0.08, b.y + b.vy*0.08); ctx.strokeStyle = b.color; ctx.lineWidth=0.003/zoom; ctx.stroke();
+      });
+
+      ctx.restore();
+      info.textContent = `t=${simTime.toFixed(3)} · steps=${stepCount} · bodies=${bodies.length}`;
+    }
+
+    function loop(now){
+      const elapsed = (now - last)/1000; last = now;
+      if(running){
+        // take several simulation steps depending on elapsed to keep real-time-ish (but stable)
+        const target = Math.max(1, Math.round(elapsed / Number(dtEl.value)));
+        for(let i=0;i<1;i++){ step(); }
+      }
+      draw();
+      requestAnimationFrame(loop);
+    }
+
+    // init
+    resize(); defaultSetup(); renderBodiesUI(); requestAnimationFrame(loop);
+
+    // support keyboard: space toggle
+    window.addEventListener('keydown', e=>{ if(e.code==='Space'){ e.preventDefault(); running=!running; playBtn.textContent = running? '暫停':'播放'; } });
+  </script>
+</body>
+</html>
